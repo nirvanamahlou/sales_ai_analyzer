@@ -1,0 +1,105 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: sales_db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sales_app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-sales_analyzer}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sales_app} -d ${POSTGRES_DB:-sales_analyzer}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:alpine
+    container_name: sales_redis
+    ports:
+      - "127.0.0.1:6379:6379"
+    restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    build: ./backend
+    command: alembic upgrade head
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-sales_app}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-sales_analyzer}
+
+  backend:
+    build: ./backend
+    container_name: sales_backend
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - ./backend:/app
+      - audio_data:/shared_audio
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-sales_app}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-sales_analyzer}
+      - AUDIO_DIRECTORY=/shared_audio
+      - CORS_ORIGINS=http://localhost:3000
+    # برای خواندن کلیدهای FARSAVA و DYNAMICS
+    env_file:
+      - ./.env
+
+  worker:
+    build: ./backend
+    container_name: sales_worker
+    command: arq app.worker.tasks.WorkerSettings
+    volumes:
+      - ./backend:/app
+      - audio_data:/shared_audio
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-sales_app}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-sales_analyzer}
+      - AUDIO_DIRECTORY=/shared_audio
+    # برای خواندن کلیدهای FARSAVA و DYNAMICS
+    env_file:
+      - ./.env
+
+  frontend:
+    build: ./frontend
+    container_name: sales_frontend
+    command: npm run dev
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    depends_on:
+      - backend
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+
+volumes:
+  postgres_data:
+  audio_data:
